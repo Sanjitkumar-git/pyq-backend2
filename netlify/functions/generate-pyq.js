@@ -3,91 +3,177 @@ const pdfParse = require('pdf-parse');
 
 function cleanText(text) {
   return text
-    .replace(/\r/g, '')
+    .replace(/\r/g, '\n')
     .replace(/\t/g, ' ')
-    .replace(/\s+/g, ' ')
+    .replace(/\u0000/g, '')
+    .replace(/[ ]{2,}/g, ' ')
     .trim();
 }
 
-function extractQuestions(text) {
-  const rawLines = text.split(/[\n\.]/);
-  const questions = [];
+function splitLines(text) {
+  return text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0);
+}
 
-  for (let line of rawLines) {
-    const clean = line.trim();
-    if (clean.length > 20) {
-      if (
-        clean.includes('?') ||
-        /^\d+[\). ]/.test(clean) ||
-        /^(what|why|how|define|explain|describe|write|differentiate|compare)/i.test(clean)
-      ) {
-        questions.push(clean);
-      }
+function detectUnit(line) {
+  const unitPatterns = [
+    /(unit\s*[-:]?\s*\d+)/i,
+    /(unit\s*[ivx]+)/i,
+    /(module\s*[-:]?\s*\d+)/i,
+    /(chapter\s*[-:]?\s*\d+)/i,
+    /(unit\s*[-]?\s*[ivx]+)/i
+  ];
+
+  for (const pattern of unitPatterns) {
+    const match = line.match(pattern);
+    if (match) {
+      return line.trim();
     }
   }
+  return null;
+}
 
-  return questions;
+function detectMarks(line) {
+  const patterns = [
+    /\((\d+)\s*marks?\)/i,
+    /\[(\d+)\]/i,
+    /(\d+)\s*marks?/i,
+    /(\d+)\s*m\b/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = line.match(pattern);
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function classifyByMarks(marks) {
+  const m = parseInt(marks || '0', 10);
+  if (m <= 2) return 'Short';
+  if (m <= 5) return 'Medium';
+  return 'Long';
+}
+
+function isQuestionLine(line) {
+  if (!line || line.length < 8) return false;
+
+  return (
+    /^\d+[\). ]/.test(line) ||
+    /^q[\.\s]?\d+/i.test(line) ||
+    /(what|why|how|define|explain|describe|differentiate|compare|write|list|discuss)/i.test(line) ||
+    line.includes('?')
+  );
 }
 
 function normalizeQuestion(q) {
   return q
     .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s?]/g, '')
-    .replace(/\s+/g, ' ');
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function extractSummary(text) {
-  const sentences = text
-    .split(/[\.!?]/)
-    .map(s => s.trim())
-    .filter(s => s.length > 40);
+function extractQuestionsWithUnitsAndMarks(text) {
+  const lines = splitLines(text);
+  let currentUnit = 'General';
+  const extracted = [];
 
-  return sentences.slice(0, 8);
-}
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
 
-function detectTopics(text, subject) {
-  const lowerText = text.toLowerCase();
-  const lowerSubject = (subject || '').toLowerCase();
+    const detectedUnit = detectUnit(line);
+    if (detectedUnit) {
+      currentUnit = detectedUnit;
+      continue;
+    }
 
-  if (lowerSubject.includes('cyber')) {
-    return [
-      'Cyber Security Basics',
-      'Cryptography',
-      'Authentication',
-      'Network Security',
-      'Cyber Attacks',
-      'Malware and Threats'
-    ];
-  }
+    if (isQuestionLine(line)) {
+      let marks = detectMarks(line);
 
-  if (lowerSubject.includes('dbms')) {
-    return ['Normalization', 'SQL', 'Transactions', 'ER Model', 'Keys', 'Indexing'];
-  }
+      let questionText = line;
 
-  if (lowerSubject.includes('os')) {
-    return ['Process', 'Thread', 'Deadlock', 'Scheduling', 'Memory Management'];
-  }
+      if (!marks && i + 1 < lines.length) {
+        const nextLineMarks = detectMarks(lines[i + 1]);
+        if (nextLineMarks && lines[i + 1].length < 30) {
+          marks = nextLineMarks;
+        }
+      }
 
-  if (lowerSubject.includes('network')) {
-    return ['OSI Model', 'TCP/IP', 'Routing', 'Switching', 'HTTP', 'Protocols'];
-  }
-
-  const possibleTopics = [];
-  const keywords = [
-    'security', 'network', 'database', 'cryptography', 'authentication',
-    'process', 'thread', 'sql', 'normalization', 'malware', 'attack'
-  ];
-
-  for (const word of keywords) {
-    if (lowerText.includes(word)) {
-      possibleTopics.push(word[0].toUpperCase() + word.slice(1));
+      extracted.push({
+        unit: currentUnit,
+        question: questionText,
+        marks: marks || 'Unknown',
+        type: classifyByMarks(marks),
+      });
     }
   }
 
-  return possibleTopics.length > 0
-    ? [...new Set(possibleTopics)]
-    : ['Important Concepts', 'Repeated Questions', 'Long Questions'];
+  return extracted;
+}
+
+function mergeRepeatedQuestions(questions) {
+  const map = {};
+
+  for (const q of questions) {
+    const normalized = normalizeQuestion(q.question);
+
+    if (!map[normalized]) {
+      map[normalized] = {
+        unit: q.unit,
+        question: q.question,
+        marks: q.marks,
+        type: q.type,
+        frequency: 1,
+      };
+    } else {
+      map[normalized].frequency += 1;
+
+      if (map[normalized].marks === 'Unknown' && q.marks !== 'Unknown') {
+        map[normalized].marks = q.marks;
+        map[normalized].type = q.type;
+      }
+    }
+  }
+
+  return Object.values(map);
+}
+
+function buildUnitWiseData(questions) {
+  const grouped = {};
+
+  for (const q of questions) {
+    if (!grouped[q.unit]) {
+      grouped[q.unit] = [];
+    }
+    grouped[q.unit].push(q);
+  }
+
+  return Object.entries(grouped).map(([unit, questions]) => ({
+    unit_name: unit,
+    questions: questions.sort((a, b) => b.frequency - a.frequency),
+  }));
+}
+
+function buildSummary(unitWiseData) {
+  const summary = [];
+
+  for (const unit of unitWiseData) {
+    const total = unit.questions.length;
+    const shortCount = unit.questions.filter(q => q.type === 'Short').length;
+    const mediumCount = unit.questions.filter(q => q.type === 'Medium').length;
+    const longCount = unit.questions.filter(q => q.type === 'Long').length;
+
+    summary.push(
+      `${unit.unit_name}: ${total} important questions found (${shortCount} short, ${mediumCount} medium, ${longCount} long).`
+    );
+  }
+
+  return summary;
 }
 
 exports.handler = async (event) => {
@@ -119,8 +205,7 @@ exports.handler = async (event) => {
     const pdfUrls = body.pdfUrls || [];
     const subject = body.subject || '';
 
-    let combinedText = '';
-    let allQuestions = [];
+    let allExtractedQuestions = [];
 
     for (const url of pdfUrls) {
       try {
@@ -131,47 +216,20 @@ exports.handler = async (event) => {
         const pdfData = await pdfParse(response.data);
         const text = cleanText(pdfData.text || '');
 
-        combinedText += ' ' + text;
-
-        const questions = extractQuestions(text);
-        allQuestions.push(...questions);
+        const extractedQuestions = extractQuestionsWithUnitsAndMarks(text);
+        allExtractedQuestions.push(...extractedQuestions);
       } catch (err) {
         console.error('PDF processing error:', err.message);
       }
     }
 
-    const normalizedMap = {};
-    const countMap = {};
+    const mergedQuestions = mergeRepeatedQuestions(allExtractedQuestions);
+    const unitWiseData = buildUnitWiseData(mergedQuestions);
+    const summary = buildSummary(unitWiseData);
 
-    for (const q of allQuestions) {
-      const normalized = normalizeQuestion(q);
-      if (!countMap[normalized]) {
-        countMap[normalized] = 0;
-        normalizedMap[normalized] = q;
-      }
-      countMap[normalized]++;
-    }
-
-    let importantQuestions = Object.entries(countMap)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 15)
-      .map(([normalized, frequency]) => ({
-        question: normalizedMap[normalized],
-        frequency,
-        category: frequency >= 2 ? 'Repeated' : 'Important',
-      }));
-
-    if (importantQuestions.length === 0) {
-      const fallbackSummary = extractSummary(combinedText);
-      importantQuestions = fallbackSummary.slice(0, 8).map((line, index) => ({
-        question: line,
-        frequency: 1,
-        category: index < 3 ? 'Summary Point' : 'Important',
-      }));
-    }
-
-    const summary = extractSummary(combinedText);
-    const topics = detectTopics(combinedText, subject);
+    const importantQuestions = mergedQuestions
+      .sort((a, b) => b.frequency - a.frequency)
+      .slice(0, 15);
 
     return {
       statusCode: 200,
@@ -181,7 +239,7 @@ exports.handler = async (event) => {
         subject,
         summary,
         important_questions: importantQuestions,
-        topics,
+        unit_wise_questions: unitWiseData,
       }),
     };
   } catch (error) {
