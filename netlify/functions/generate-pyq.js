@@ -26,15 +26,31 @@ function normalizeQuestion(q) {
 }
 
 exports.handler = async (event) => {
-  try {
-    if (event.httpMethod !== 'POST') {
-      return {
-        statusCode: 405,
-        body: JSON.stringify({ error: 'Method not allowed' }),
-      };
-    }
+  const headers = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Content-Type': 'application/json',
+  };
 
-    const body = JSON.parse(event.body);
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({ message: 'CORS preflight success' }),
+    };
+  }
+
+  if (event.httpMethod !== 'POST') {
+    return {
+      statusCode: 405,
+      headers,
+      body: JSON.stringify({ error: 'Method not allowed' }),
+    };
+  }
+
+  try {
+    const body = JSON.parse(event.body || '{}');
     const pdfUrls = body.pdfUrls || [];
     const subject = body.subject || '';
 
@@ -68,13 +84,13 @@ exports.handler = async (event) => {
     }
 
     const importantQuestions = Object.entries(countMap)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 20)
-        .map(([normalized, frequency]) => ({
-          question: originalMap[normalized],
-          frequency,
-          category: 'Important',
-        }));
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([normalized, frequency]) => ({
+        question: originalMap[normalized],
+        frequency,
+        category: 'Important',
+      }));
 
     let topics = [];
     const lowerSubject = subject.toLowerCase();
@@ -91,6 +107,7 @@ exports.handler = async (event) => {
 
     return {
       statusCode: 200,
+      headers,
       body: JSON.stringify({
         status: 'success',
         subject,
@@ -102,6 +119,7 @@ exports.handler = async (event) => {
     console.error('Function error:', error);
     return {
       statusCode: 500,
+      headers,
       body: JSON.stringify({
         error: 'Internal server error',
         details: error.message,
